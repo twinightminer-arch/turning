@@ -5,10 +5,11 @@ description: 把 Python 逻辑做成"带 tkinter 界面 + 自定义图标"的 Wi
 
 # 让 Python 变成「带界面的 Windows exe」
 
-> **⚠️ 发布三条硬要求（每轮都要执行，详见 §13 / §14）**
+> **⚠️ 发布四条硬要求（每轮都要执行，详见 §13 / §14）**
 > 1. **每次发布前，主动询问用户**是否需要"制作安装包 exe 并上传" —— 不要默认用户只要便携版，也不要默认不需要上传。
 > 2. **二进制产物（`.exe` / `.apk`）自动放 GitHub Release** —— 不能只推源码。
 > 3. **版本号**：首版一律 `0.1.0`，之后每次 +`0.0.1`（**满 10 进位**，如 `0.1.9 → 0.2.0`）；重制则从重制版重新 `0.1.0` 起；大改动先问"是否 +0.1.0"；多分支先问哪个是主分支，非主分支在主分支号后加 `A/B/C…` 后缀，合并后回归主分支迭代。
+> 4. **封装前必做「平台串台」自检** —— 确认没有把 **Android 代码写成 Windows 端**、或**把 Windows 代码写成 Android 端**（核心逻辑层禁止出现 `tkinter` / `kivy` 等平台 import），详见 §10.5。
 
 ## 0. 先定交互形态（问清或按用户原话）
 - **「打包成可用 exe」** ≠ 「打开就自动跑」。用户要的是**窗口 + 功能按钮**时，就做 GUI（`--windowed`），点击按钮才执行。
@@ -174,6 +175,80 @@ build_android.sh  # buildozer -v android debug
 - Android 侧额外要处理：权限声明、前台/后台服务、存储访问、签名（debug 自动 keystore / release 正式 keystore）
 - 若用户只是想「在手机上用」，先反问一句「必须做成 APK 吗？」—— 网页版 / Termux 脚本往往更省事
 
+### 10.5 封装前必做：「平台串台」自检（硬要求）
+
+**为什么必须查**：同一个项目经常同时出 Windows 版和 Android 版。最容易犯的错就是**把一端代码写进另一端的层里** ——
+把 `import tkinter` 写进本该两端共用的 `core.py`，Windows 侧打包看着正常，Android 侧一打就废；
+反过来把 `from kivy.app import App`、`from jnius import autoclass` 混进 PC 版，exe 启动即崩。
+这类错误**编译器和打包器都不会主动提示**，必须在封装前主动查。
+
+**检查清单（四项，缺一不可）**：
+
+| # | 检查项 | 判定标准 |
+|---|---|---|
+| 1 | **核心逻辑层纯净** | `core.py`（及所有两端共用模块）**不得出现** `tkinter`、`kivy`、`jnius`、`android`、`plyer`、`win32*`、`ctypes.windll` 等任一平台专属 import |
+| 2 | **UI 层各归各位** | `ui_win.py` 只允许 Windows 栈（tkinter/win32）；`ui_android.py` 只允许 Android 栈（Kivy/jnius）；**交叉即错** |
+| 3 | **平台分支收拢** | `if sys.platform` / `os.name` 判断**集中在一个 compat 模块**，不要散落在业务代码里 |
+| 4 | **路径与 API 无硬编码** | Windows 侧不该出现 `app.user_data_dir`；Android 侧不该出现 `C:\`、`%APPDATA%`、注册表、`SHFileOperation`、`.lnk` |
+
+**做法（经验：AST 扫描比 `grep` 准得多）**
+`grep` 会把注释、字符串、文档里的关键词一起算进去，误报一堆。用 `ast` 解析 import 节点最干净：
+
+```python
+# check_platform_leak.py —— 封装前跑一次，退出码非 0 即拦截打包
+import ast, sys, pathlib
+
+WIN_ONLY = {"tkinter", "winreg", "win32api", "win32con", "win32com", "pythoncom", "pywin32"}
+AND_ONLY = {"kivy", "jnius", "plyer", "android", "buildozer"}
+SHARED_MUST_BE_CLEAN = {"core.py", "logic.py", "model.py"}   # 两端共用，必须零平台依赖
+
+def imports_of(path):
+    tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    got = set()
+    for n in ast.walk(tree):                     # walk 覆盖函数体内部的 import
+        if isinstance(n, ast.Import):
+            got |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, ast.ImportFrom):
+            if n.module:                         # 跳过相对 import
+                got.add(n.module.split(".")[0])
+    return got
+
+bad = []
+for p in pathlib.Path(".").rglob("*.py"):
+    if any(s in p.parts for s in ("build", "dist", ".venv", "venv")):
+        continue
+    lw, la = imports_of(p) & WIN_ONLY, imports_of(p) & AND_ONLY
+    if p.name in SHARED_MUST_BE_CLEAN and (lw or la):
+        bad.append(f"[核心层污染] {p}: {sorted(lw | la)}")
+    if p.name == "ui_android.py" and lw:
+        bad.append(f"[Android 层混入 Windows 代码] {p}: {sorted(lw)}")
+    if p.name == "ui_win.py" and la:
+        bad.append(f"[Windows 层混入 Android 代码] {p}: {sorted(la)}")
+    if lw and la:
+        bad.append(f"[同文件双平台混用] {p}: win={sorted(lw)} android={sorted(la)}")
+
+print("\n".join(bad) if bad else "PLATFORM_LEAK_CHECK: OK")
+sys.exit(1 if bad else 0)
+```
+
+```bash
+python check_platform_leak.py     # 退出码 0 才允许进入打包
+```
+
+**处理经验（踩过的坑）**：
+
+1. **报错信息会骗人** —— Android 侧打包失败时抛的是 buildozer/Kivy 的错，根因却常是 `core.py` 里一句
+   `import tkinter`。Android 端"莫名"起不来，**先跑本检查**再深挖。
+2. **写在函数体里的 `import` 也算** —— 有人为了"延迟导入"把 `import tkinter` 塞进函数内部，
+   `grep "^import"` 根本抓不到；AST 遍历全部节点**能抓到函数内 import**，这是它优于 grep 的关键。
+3. **`try/except ImportError` 掩护的平台代码同样是坑** —— 形如
+   `try: import tkinter` / `except ImportError: pass` 看似"优雅兼容"，实际会让打包器把 tkinter 塞进 Android 包，
+   体积暴涨且运行报错。要么挪到平台层，要么用显式 `if sys.platform` 分支。
+4. **修完必须复跑** —— 把平台 import 移到 `ui_*.py` 后**重新跑检查**、确认退出码为 0 再打包，别凭"我改过了"就发版。
+5. **打包链也要对齐** —— 检查通过 ≠ 打包链选对：`.exe` 只能 PyInstaller、`.apk` 只能 buildozer/briefcase，
+   **PyInstaller 出不了 APK**（新人最常犯）。
+6. **两端都产出时，一次改两端都验** —— 只验 Windows 版就发布，Android 侧的串台会拖到用户手里才炸。
+
 ### 模拟器启动 / 关闭 / 排障
 已独立为 **`android-emulator-start`** skill —— 启动 AVD、等待 boot 完成、失败排查都在那边。
 （骨架：只认 adb 契约 · detached+unref · `-no-snapshot-save` · 轮询 `getprop sys.boot_completed`。
@@ -247,6 +322,16 @@ gh release upload v1.0.0 "dist/MyTool.exe" --clobber
 ```
 - 源码（`.zip` / tarball）作为附件或走常规 git push，但 **`.exe` / `.apk` 这类二进制一定挂 Release**。
 - 沙箱里 `git push` 走不通时（CONNECT tunnel failed / 443 超时），改用 Git Data API / Contents API 推送源码 + Release API 上传产物。
+
+**③ 封装前做「平台串台」自检（新增硬要求）**
+打包动作**开始之前**，先确认没有把 Android 代码写成 Windows 端、或把 Windows 代码写成 Android 端。
+这是"发布"流程里的固定一环，**不是可选项**：
+
+- 跑一遍 §10.5 的 `check_platform_leak.py`，**退出码必须为 0** 才允许继续打包；
+- 重点看 `core.py` 这类两端共用模块有没有混进 `tkinter` / `kivy` / `jnius` 等平台 import；
+- 发现问题先把平台代码挪回 `ui_win.py` / `ui_android.py`，**改完再跑一次**确认清零；
+- 两端都出产物时**两端都要过检查**，不能只验一侧；
+- 打包链同时对齐：`.exe` → PyInstaller，`.apk` → buildozer/briefcase（PyInstaller 出不了 APK）。
 
 ### 13.2 NSIS 安装包怎么实做（本机已验证）
 
