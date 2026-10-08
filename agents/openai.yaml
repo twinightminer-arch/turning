@@ -1,0 +1,7 @@
+interface:
+  display_name: "GUI 工具打包（Win/Android）"
+  short_description: "Python→带界面的 exe（tkinter+图标）；发布重指快捷方式；安卓走 buildozer"
+  brand_color: "#1869FF"
+  default_prompt: "Use $win-gui-tool-exe: 把 Python 逻辑做成带 tkinter 界面与自定义图标的 Windows 单文件 exe，发布后把桌面/开始菜单快捷方式重定向到最新产物并读回验证；每次发布前主动询问是否再制作安装包 exe 并上传，二进制产物（exe/apk）一律挂 GitHub Release；版本号首版 0.1.0、每次 +0.0.1，重制则从 0.1.0 重新起，大改动先问是否 +0.1.0，多分支先问哪个是主分支、次分支加 A/B/C 后缀、合并后回归主分支迭代；若目标是 Android 则改用 Kivy + buildozer，UI 层与核心逻辑分层。"
+policy:
+  allow_implicit_invocation: true
